@@ -143,6 +143,28 @@ html, body, #root {
   pointer-events: none;
 }
 
+/* ==============================
+   Drag Handle (Mobile Bottom Sheet)
+   ============================== */
+.drag-handle-container {
+  display: none;
+  width: 100%;
+  padding-bottom: 12px;
+  justify-content: center;
+  align-items: center;
+  cursor: grab;
+  touch-action: none;
+}
+.drag-handle-container:active {
+  cursor: grabbing;
+}
+.drag-handle {
+  width: 36px;
+  height: 5px;
+  background: var(--color-border);
+  border-radius: var(--radius-full);
+}
+
 /* Scrollbar Styling */
 .control-panel::-webkit-scrollbar {
   width: 4px;
@@ -391,7 +413,37 @@ html, body, #root {
    ============================== */
 @media (max-width: 768px) {
   .control-panel {
-    width: calc(100vw - 32px);
-    max-height: 60vh;
+    top: auto;
+    bottom: 0;
+    left: 0;
+    width: 100vw;
+    max-height: 85vh;
+    border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+    border-bottom: none;
+    border-left: none;
+    border-right: none;
+    padding: 12px 20px 24px;
+    animation: none;
+    transition: transform var(--transition-normal) ease-out;
+  }
+  
+  .control-panel.collapsed {
+    /* Mobile minimized state: transform down leaving the header visible */
+    transform: translateY(calc(100% - 76px));
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .slide-in {
+    animation: none;
+  }
+
+  .drag-handle-container {
+    display: flex;
+  }
+
+  /* Hide close button and toggle button on mobile since we rely on the bottom sheet handle */
+  .desktop-only-btn {
+    display: none !important;
   }
 }

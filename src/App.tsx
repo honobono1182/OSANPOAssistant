@@ -8,6 +8,7 @@ import {
   generateWalkingRoute,
   findNearestSegmentIndex,
   type RouteResult,
+  type WaypointInput,
 } from './services/RoutingService';
 
 function App() {
@@ -29,7 +30,7 @@ function App() {
 
   // ルート生成
   const handleGenerateRoute = useCallback(
-    async (targetDistanceMeters: number) => {
+    async (targetDistanceMeters: number, waypoint: WaypointInput) => {
       if (!position) {
         setRouteError('現在地が取得できていません。位置情報を許可してください。');
         return;
@@ -42,7 +43,8 @@ function App() {
         const result: RouteResult = await generateWalkingRoute(
           position.latitude,
           position.longitude,
-          targetDistanceMeters
+          targetDistanceMeters,
+          waypoint
         );
         setRouteCoords(result.coordinates);
         setRouteInfo({
@@ -100,7 +102,7 @@ function App() {
       {/* パネル開閉ボタン (パネルが閉じているとき) */}
       {!panelOpen && (
         <button
-          className="btn-float toggle-panel-btn"
+          className="btn-float toggle-panel-btn desktop-only-btn"
           onClick={() => setPanelOpen(true)}
           aria-label="メニューを開く"
         >
@@ -122,7 +124,7 @@ function App() {
       {/* パネル閉じるボタン */}
       {panelOpen && (
         <button
-          className="btn-float"
+          className="btn-float desktop-only-btn"
           style={{ position: 'absolute', top: '16px', left: '392px', zIndex: 1001 }}
           onClick={() => setPanelOpen(false)}
           aria-label="パネルを閉じる"

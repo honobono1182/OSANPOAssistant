@@ -13,12 +13,104 @@ export interface RouteResult {
   durationSeconds: number;
 }
 
+export type WaypointInput = 
+  | { type: 'none' }
+  | { type: 'text'; text: string }
+  | { type: 'category'; category: string };
+
 const OSRM_API_BASE = 'https://router.project-osrm.org';
 
 // 歩幅定数（メートル）
 const STEP_LENGTH_METERS = 0.7;
 // 歩行速度（km/h）
 const WALKING_SPEED_KMH = 4.0;
+
+/**
+ * 経由地のフリーワード検索 (Nominatim API)
+ */
+export async function geocodeLocation(
+  query: string,
+  lat: number,
+  lng: number
+): Promise<[number, number]> {
+  // 現在地周辺を優先して検索
+  const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(
+    query
+  )}&format=json&limit=1&viewbox=${lng - 0.1},${lat - 0.1},${lng + 0.1},${lat + 0.1}&bounded=0`;
+  const res = await fetch(url, { headers: { 'Accept-Language': 'ja' } });
+  if (!res.ok) throw new Error('場所の検索に失敗しました');
+  const data = await res.json();
+  if (!data || data.length === 0) {
+    throw new Error(`「${query}」が見つかりませんでした。別の場所を試してください。`);
+  }
+  return [parseFloat(data[0].lat), parseFloat(data[0].lon)];
+}
+
+/**
+ * 現在地周辺のカテゴリPOI検索 (Overpass API)
+ */
+export async function findPOINearby(
+  lat: number,
+  lng: number,
+  category: string,
+  radiusMeters: number
+): Promise<[number, number]> {
+  let queryBody = '';
+  switch (category) {
+    case 'cafe':
+      queryBody = `node["amenity"="cafe"](around:${radiusMeters},${lat},${lng});`;
+      break;
+    case 'park':
+      queryBody = `
+        node["leisure"="park"](around:${radiusMeters},${lat},${lng});
+        way["leisure"="park"](around:${radiusMeters},${lat},${lng});
+        relation["leisure"="park"](around:${radiusMeters},${lat},${lng});
+      `;
+      break;
+    case 'convenience':
+      queryBody = `node["shop"="convenience"](around:${radiusMeters},${lat},${lng});`;
+      break;
+    case 'shrine':
+      queryBody = `
+        node["amenity"="place_of_worship"](around:${radiusMeters},${lat},${lng});
+        way["amenity"="place_of_worship"](around:${radiusMeters},${lat},${lng});
+      `;
+      break;
+    default:
+      throw new Error('未対応のカテゴリです');
+  }
+
+  const overpassQuery = `
+    [out:json][timeout:15];
+    (
+      ${queryBody}
+    );
+    out center limit 20;
+  `;
+
+  const url = `https://overpass-api.de/api/interpreter`;
+  const res = await fetch(url, {
+    method: 'POST',
+    body: overpassQuery,
+  });
+
+  if (!res.ok) throw new Error('POIの検索に失敗しました');
+  const data = await res.json();
+  if (!data.elements || data.elements.length === 0) {
+    throw new Error('指定された範囲内に該当する場所が見つかりませんでした。');
+  }
+
+  // ランダムに1件選択
+  const element = data.elements[Math.floor(Math.random() * data.elements.length)];
+  const resultLat = element.lat || element.center?.lat;
+  const resultLng = element.lon || element.center?.lon;
+
+  if (!resultLat || !resultLng) {
+    throw new Error('POIの座標が取得できませんでした');
+  }
+
+  return [resultLat, resultLng];
+}
 
 /**
  * 目標歩数からおおよその目標距離（メートル）を算出
@@ -45,36 +137,88 @@ export function minutesToDistance(minutes: number): number {
 export async function generateWalkingRoute(
   startLat: number,
   startLng: number,
-  targetDistanceMeters: number
+  targetDistanceMeters: number,
+  waypointInput: WaypointInput = { type: 'none' }
 ): Promise<RouteResult> {
-  // ルートの半径（概算）: 周長 = 2πr → r = distance / (2π)
-  const radius = targetDistanceMeters / (2 * Math.PI);
-
-  // 4つのウェイポイントを配置して円状ルートを形成
-  const centerAngle = Math.random() * 2 * Math.PI;
-  const centerLat = startLat + (radius * Math.cos(centerAngle)) / 111320;
-  const centerLng =
-    startLng +
-    (radius * Math.sin(centerAngle)) / (111320 * Math.cos((startLat * Math.PI) / 180));
-
-  const waypoints: [number, number][] = [];
-  const numWaypoints = 4;
-
-  for (let i = 0; i < numWaypoints; i++) {
-    const angle = centerAngle + Math.PI + (2 * Math.PI * i) / numWaypoints;
-    const wpLat = centerLat + (radius * Math.cos(angle)) / 111320;
-    const wpLng =
-      centerLng +
-      (radius * Math.sin(angle)) / (111320 * Math.cos((centerLat * Math.PI) / 180));
-    waypoints.push([wpLat, wpLng]);
+  // 1. 経由地座標の取得
+  let waypointCoords: [number, number] | null = null;
+  
+  if (waypointInput.type === 'text') {
+    waypointCoords = await geocodeLocation(waypointInput.text, startLat, startLng);
+  } else if (waypointInput.type === 'category') {
+    // 検索半径は目標距離の半分（往復を考慮） + 余白
+    const searchRadius = Math.max(500, targetDistanceMeters / 2);
+    waypointCoords = await findPOINearby(startLat, startLng, waypointInput.category, searchRadius);
   }
 
-  // OSRM API call:  start -> wp1 -> wp2 -> wp3 -> wp4 -> start
-  const allPoints: [number, number][] = [
-    [startLat, startLng],
-    ...waypoints,
-    [startLat, startLng],
-  ];
+  let allPoints: [number, number][] = [];
+
+  if (!waypointCoords) {
+    // 経由地がない場合：従来のランダムループ生成
+    const radius = targetDistanceMeters / (2 * Math.PI);
+    const centerAngle = Math.random() * 2 * Math.PI;
+    const centerLat = startLat + (radius * Math.cos(centerAngle)) / 111320;
+    const centerLng =
+      startLng +
+      (radius * Math.sin(centerAngle)) / (111320 * Math.cos((startLat * Math.PI) / 180));
+
+    const waypoints: [number, number][] = [];
+    const numWaypoints = 4;
+
+    for (let i = 0; i < numWaypoints; i++) {
+      const angle = centerAngle + Math.PI + (2 * Math.PI * i) / numWaypoints;
+      const wpLat = centerLat + (radius * Math.cos(angle)) / 111320;
+      const wpLng =
+        centerLng +
+        (radius * Math.sin(angle)) / (111320 * Math.cos((centerLat * Math.PI) / 180));
+      waypoints.push([wpLat, wpLng]);
+    }
+
+    allPoints = [
+      [startLat, startLng],
+      ...waypoints,
+      [startLat, startLng],
+    ];
+  } else {
+    // 経由地がある場合：行きと帰りで経路を変えるため迂回ポイントを追加
+    const distToWp = haversine(startLat, startLng, waypointCoords[0], waypointCoords[1]);
+    
+    // 余剰距離 (目標距離から直線往復距離を引いたもの)
+    const surplus = Math.max(0, targetDistanceMeters - (distToWp * 2));
+    
+    // 経度・緯度の差分
+    const dx = waypointCoords[1] - startLng;
+    const dy = waypointCoords[0] - startLat;
+    const len = Math.sqrt(dx * dx + dy * dy) || 1e-9;
+    
+    // 垂直方向の単位ベクトル
+    const nx = -dy / len;
+    const ny = dx / len;
+    
+    // 片道の膨らみ幅 (余剰距離の1/4程度をオフセットとする)
+    const offsetMeters = surplus / 4;
+    // 緯度の1度は約111320m
+    const offsetDegree = offsetMeters / 111320;
+    
+    // 経度補正（緯度によって経度1度の距離が変わるため）
+    const cosLat = Math.cos((startLat * Math.PI) / 180);
+    const offsetLngDegree = offsetDegree / (cosLat || 1);
+    
+    // 中間地点を行き(40%地点)と帰り(60%地点)に配置し、左右に膨らませる
+    const detour1Lat = startLat + dy * 0.4 + ny * offsetDegree;
+    const detour1Lng = startLng + dx * 0.4 + nx * offsetLngDegree;
+    
+    const detour2Lat = startLat + dy * 0.6 - ny * offsetDegree;
+    const detour2Lng = startLng + dx * 0.6 - nx * offsetLngDegree;
+    
+    allPoints = [
+      [startLat, startLng],
+      [detour1Lat, detour1Lng],
+      waypointCoords,
+      [detour2Lat, detour2Lng],
+      [startLat, startLng]
+    ];
+  }
 
   // OSRM uses lng,lat order
   const coordsStr = allPoints.map(([lat, lng]) => `${lng},${lat}`).join(';');
