@@ -68,6 +68,7 @@ export function useGeolocation(): UseGeolocationReturn {
     }
     setIsLoading(true);
     navigator.geolocation.getCurrentPosition(handleSuccess, handleError, geoOptions);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [handleSuccess, handleError]);
 
   const startTracking = useCallback(() => {
@@ -80,6 +81,7 @@ export function useGeolocation(): UseGeolocationReturn {
     const id = navigator.geolocation.watchPosition(handleSuccess, handleError, geoOptions);
     watchIdRef.current = id;
     setIsTracking(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [handleSuccess, handleError]);
 
   const stopTracking = useCallback(() => {
@@ -98,6 +100,7 @@ export function useGeolocation(): UseGeolocationReturn {
         navigator.geolocation.clearWatch(watchIdRef.current);
       }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return {
