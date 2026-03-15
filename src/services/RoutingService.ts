@@ -55,47 +55,78 @@ export async function findPOINearby(
   category: string,
   radiusMeters: number
 ): Promise<[number, number]> {
+  // 広範囲すぎるとタイムアウトするため、最大でも半径1000m～2000m程度に絞る
+  const safeRadius = Math.min(radiusMeters, 2000);
+
   let queryBody = '';
   switch (category) {
     case 'cafe':
-      queryBody = `node["amenity"="cafe"](around:${radiusMeters},${lat},${lng});`;
+      queryBody = `node["amenity"="cafe"](around:${safeRadius},${lat},${lng});`;
       break;
     case 'park':
       queryBody = `
-        node["leisure"="park"](around:${radiusMeters},${lat},${lng});
-        way["leisure"="park"](around:${radiusMeters},${lat},${lng});
-        relation["leisure"="park"](around:${radiusMeters},${lat},${lng});
+        node["leisure"="park"](around:${safeRadius},${lat},${lng});
+        way["leisure"="park"](around:${safeRadius},${lat},${lng});
       `;
       break;
     case 'convenience':
-      queryBody = `node["shop"="convenience"](around:${radiusMeters},${lat},${lng});`;
+      queryBody = `node["shop"="convenience"](around:${safeRadius},${lat},${lng});`;
       break;
     case 'shrine':
       queryBody = `
-        node["amenity"="place_of_worship"](around:${radiusMeters},${lat},${lng});
-        way["amenity"="place_of_worship"](around:${radiusMeters},${lat},${lng});
+        node["amenity"="place_of_worship"](around:${safeRadius},${lat},${lng});
+        way["amenity"="place_of_worship"](around:${safeRadius},${lat},${lng});
       `;
       break;
     default:
       throw new Error('未対応のカテゴリです');
   }
 
+  // リレーション等重いクエリは省き、シンプルに25秒タイムアウトに設定
   const overpassQuery = `
-    [out:json][timeout:15];
+    [out:json][timeout:25];
     (
       ${queryBody}
     );
     out center limit 20;
   `;
 
-  const url = `https://overpass-api.de/api/interpreter`;
-  const res = await fetch(url, {
-    method: 'POST',
-    body: overpassQuery,
-  });
+  const endpoints = [
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter',
+    'https://lz4.overpass-api.de/api/interpreter'
+  ];
 
-  if (!res.ok) throw new Error('POIの検索に失敗しました');
-  const data = await res.json();
+  let data = null;
+  let lastError = null;
+
+  for (const url of endpoints) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded'
+        },
+        body: `data=${encodeURIComponent(overpassQuery)}`,
+      });
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      
+      data = await res.json();
+      break; // 成功したらループを抜ける
+    } catch (err) {
+      lastError = err;
+      console.warn(`Overpass API error at ${url}:`, err);
+      // 次のエンドポイントへ
+    }
+  }
+
+  if (!data) {
+    throw new Error(`POIの検索に失敗しました。時間をおいて再試行してください。（詳細: ${lastError instanceof Error ? lastError.message : 'Unknown'}）`);
+  }
+
   if (!data.elements || data.elements.length === 0) {
     throw new Error('指定された範囲内に該当する場所が見つかりませんでした。');
   }

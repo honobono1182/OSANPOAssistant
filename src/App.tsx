@@ -73,15 +73,24 @@ function App() {
   useEffect(() => {
     if (!isNavigating || !position || !routeCoords) return;
 
-    const nearestIdx = findNearestSegmentIndex(
+    // 最新の現在地をもとに最も近いセグメントを探すが、
+    // 大きく逆行したりショートカットしないよう、現在の passedSegmentIndex から少し先（例えば +5 程度）までを探すのが安全
+    const searchRange = Math.min(routeCoords.length - 1, passedSegmentIndex + 10);
+    const searchCoords = routeCoords.slice(passedSegmentIndex, searchRange + 1);
+    
+    // スライスした配列で一番近いインデックスを探す
+    const localNearestIdx = findNearestSegmentIndex(
       position.latitude,
       position.longitude,
-      routeCoords
+      searchCoords
     );
 
+    // 全体インデックスに直す
+    const globalNearestIdx = passedSegmentIndex + localNearestIdx;
+
     // 後退はしない（戻ることを防ぐ）
-    setPassedSegmentIndex((prev) => Math.max(prev, nearestIdx));
-  }, [position, isNavigating, routeCoords]);
+    setPassedSegmentIndex((prev) => Math.max(prev, globalNearestIdx));
+  }, [position, isNavigating, routeCoords, passedSegmentIndex]);
 
   // 現在地に戻るボタン
   const handleRecenter = useCallback(() => {
