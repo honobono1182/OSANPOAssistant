@@ -86,8 +86,18 @@ export function ControlPanel({
         <div className="drag-handle" />
       </div>
 
-      {/* Header */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
+      {/* Header - モバイルではタップでパネルを閉じる */}
+      <div
+        className="panel-header"
+        onClick={() => {
+          // パネルが開いている状態でタップされた場合、パネル全体を閉じて設定もリセット
+          if (isOpen) {
+            setIsSettingsOpen(false);
+            onToggle();
+          }
+        }}
+        style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', cursor: 'pointer' }}
+      >
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <div style={{
             width: '36px',
@@ -109,7 +119,9 @@ export function ControlPanel({
             </p>
           </div>
         </div>
-        <ThemeToggle theme={theme} onToggle={onToggleTheme} />
+        <div onClick={(e) => e.stopPropagation()}>
+          <ThemeToggle theme={theme} onToggle={onToggleTheme} />
+        </div>
       </div>
 
       <div className="divider" />

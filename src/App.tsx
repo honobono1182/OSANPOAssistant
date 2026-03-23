@@ -73,11 +73,12 @@ function App() {
   useEffect(() => {
     if (!isNavigating || !position || !routeCoords) return;
 
-    // 最新の現在地をもとに最も近いセグメントを探すが、
-    // 大きく逆行したりショートカットしないよう、現在の passedSegmentIndex から少し先（例えば +5 程度）までを探すのが安全
-    const searchRange = Math.min(routeCoords.length - 1, passedSegmentIndex + 10);
-    const searchCoords = routeCoords.slice(passedSegmentIndex, searchRange + 1);
+    // 現在の passedSegmentIndex から全ルートの終端までを探索範囲とする
+    // （GPS更新頻度が低い場合や移動速度が速い場合でも追従できるようにする）
+    const searchCoords = routeCoords.slice(passedSegmentIndex);
     
+    if (searchCoords.length < 2) return;
+
     // スライスした配列で一番近いインデックスを探す
     const localNearestIdx = findNearestSegmentIndex(
       position.latitude,
@@ -97,6 +98,11 @@ function App() {
     setFollowUser(true);
   }, []);
 
+  // マップ手動操作時にフォロー解除
+  const handleStopFollow = useCallback(() => {
+    setFollowUser(false);
+  }, []);
+
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
       {/* マップ全画面 */}
@@ -106,6 +112,7 @@ function App() {
         routeCoords={routeCoords}
         passedSegmentIndex={passedSegmentIndex}
         followUser={followUser}
+        onUserInteraction={handleStopFollow}
       />
 
       {/* パネル開閉ボタン (パネルが閉じているとき) */}

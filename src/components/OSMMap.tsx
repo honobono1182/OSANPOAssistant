@@ -17,15 +17,32 @@ const TILE_ATTRIBUTION =
 const DARK_TILE_ATTRIBUTION =
   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>';
 
-// --- Sub-component to handle map center updates ---
+// --- Sub-component to handle map center updates & user interaction ---
 function MapCenterUpdater({
   position,
   shouldFollow,
+  onUserInteraction,
 }: {
   position: GeoPosition | null;
   shouldFollow: boolean;
+  onUserInteraction?: () => void;
 }) {
   const map = useMap();
+
+  // ユーザーがマップを手動で操作したときにfollowUserを無効化
+  useEffect(() => {
+    if (!onUserInteraction) return;
+
+    const handleDragStart = () => {
+      onUserInteraction();
+    };
+
+    map.on('dragstart', handleDragStart);
+
+    return () => {
+      map.off('dragstart', handleDragStart);
+    };
+  }, [map, onUserInteraction]);
 
   useEffect(() => {
     if (position && shouldFollow) {
@@ -56,6 +73,7 @@ interface OSMMapProps {
   routeCoords: [number, number][] | null;
   passedSegmentIndex: number;
   followUser: boolean;
+  onUserInteraction?: () => void;
   onMapReady?: (map: LeafletMap) => void;
 }
 
@@ -65,6 +83,7 @@ export function OSMMap({
   routeCoords,
   passedSegmentIndex,
   followUser,
+  onUserInteraction,
 }: OSMMapProps) {
   const mapRef = useRef<LeafletMap | null>(null);
 
@@ -91,7 +110,7 @@ export function OSMMap({
       ref={mapRef}
     >
       <TileLayerSwitcher theme={theme} />
-      <MapCenterUpdater position={position} shouldFollow={followUser} />
+      <MapCenterUpdater position={position} shouldFollow={followUser} onUserInteraction={onUserInteraction} />
 
       {/* 通過済みルート (灰色) */}
       {passedCoords.length > 1 && (

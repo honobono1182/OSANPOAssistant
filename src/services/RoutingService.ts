@@ -2,9 +2,8 @@
  * ルーティングサービス
  * OSRM 公開デモAPIを利用して円状（ループ状）の散歩ルートを生成する。
  * 
- * ★ driving プロファイルを使用することで、国道・県道などの
- *   大きい道を優先的にルーティングし、山道や小道を回避する。
- *   所要時間は歩行速度（時速4km）で再計算する。
+ * ★ foot プロファイルを使用して歩行者向けルートを生成する。
+ *   目標距離と乖離する場合は半径を自動調整してリトライする。
  */
 
 export interface RouteResult {
@@ -22,8 +21,6 @@ const OSRM_API_BASE = 'https://router.project-osrm.org';
 
 // 歩幅定数（メートル）
 const STEP_LENGTH_METERS = 0.7;
-// 歩行速度（km/h）
-const WALKING_SPEED_KMH = 4.0;
 
 /**
  * 経由地のフリーワード検索 (Nominatim API)
@@ -154,7 +151,8 @@ export function stepsToDistance(steps: number): number {
  * 目標時間（分）からおおよその目標距離（メートル）を算出
  */
 export function minutesToDistance(minutes: number): number {
-  return (minutes / 60) * WALKING_SPEED_KMH * 1000;
+  const walkingSpeedKmh = 4.0;
+  return (minutes / 60) * walkingSpeedKmh * 1000;
 }
 
 /**
@@ -162,8 +160,8 @@ export function minutesToDistance(minutes: number): number {
  * distanceMetersは往復の合計距離（目標距離）。
  * 複数のウェイポイントを使い円に近いルートを作る。
  * 
- * driving プロファイルを用いて主要道路（国道・県道）を優先し、
- * 山道や未舗装路を回避する。
+ * foot プロファイルを用いて歩行者向けルートを生成する。
+ * 目標距離と大きく乖離する場合は半径を調整してリトライする。
  */
 export async function generateWalkingRoute(
   startLat: number,
@@ -182,106 +180,131 @@ export async function generateWalkingRoute(
     waypointCoords = await findPOINearby(startLat, startLng, waypointInput.category, searchRadius);
   }
 
-  let allPoints: [number, number][] = [];
+  // 道路膨張係数: 実道路は直線距離より約1.3〜1.5倍長い
+  const ROAD_EXPANSION_FACTOR = 1.4;
+  // 最大リトライ回数
+  const MAX_RETRIES = 2;
+  // 許容倍率（目標距離のこの倍率以内なら許容）
+  const TOLERANCE_RATIO = 1.3;
 
-  if (!waypointCoords) {
-    // 経由地がない場合：従来のランダムループ生成
-    const radius = targetDistanceMeters / (2 * Math.PI);
-    const centerAngle = Math.random() * 2 * Math.PI;
-    const centerLat = startLat + (radius * Math.cos(centerAngle)) / 111320;
-    const centerLng =
-      startLng +
-      (radius * Math.sin(centerAngle)) / (111320 * Math.cos((startLat * Math.PI) / 180));
+  let scaleFactor = 1.0;
 
-    const waypoints: [number, number][] = [];
-    const numWaypoints = 4;
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    let allPoints: [number, number][] = [];
 
-    for (let i = 0; i < numWaypoints; i++) {
-      const angle = centerAngle + Math.PI + (2 * Math.PI * i) / numWaypoints;
-      const wpLat = centerLat + (radius * Math.cos(angle)) / 111320;
-      const wpLng =
-        centerLng +
-        (radius * Math.sin(angle)) / (111320 * Math.cos((centerLat * Math.PI) / 180));
-      waypoints.push([wpLat, wpLng]);
+    if (!waypointCoords) {
+      // 経由地がない場合：ランダムループ生成
+      // 実道路の膨張を考慮して半径を縮小
+      const radius = (targetDistanceMeters / (2 * Math.PI * ROAD_EXPANSION_FACTOR)) * scaleFactor;
+      const centerAngle = Math.random() * 2 * Math.PI;
+      const centerLat = startLat + (radius * Math.cos(centerAngle)) / 111320;
+      const centerLng =
+        startLng +
+        (radius * Math.sin(centerAngle)) / (111320 * Math.cos((startLat * Math.PI) / 180));
+
+      const waypoints: [number, number][] = [];
+      const numWaypoints = 4;
+
+      for (let i = 0; i < numWaypoints; i++) {
+        const angle = centerAngle + Math.PI + (2 * Math.PI * i) / numWaypoints;
+        const wpLat = centerLat + (radius * Math.cos(angle)) / 111320;
+        const wpLng =
+          centerLng +
+          (radius * Math.sin(angle)) / (111320 * Math.cos((centerLat * Math.PI) / 180));
+        waypoints.push([wpLat, wpLng]);
+      }
+
+      allPoints = [
+        [startLat, startLng],
+        ...waypoints,
+        [startLat, startLng],
+      ];
+    } else {
+      // 経由地がある場合：行きと帰りで経路を変えるため迂回ポイントを追加
+      const distToWp = haversine(startLat, startLng, waypointCoords[0], waypointCoords[1]);
+      
+      // 余剰距離 (目標距離から直線往復距離を引いたもの) - 膨張を考慮
+      const surplus = Math.max(0, (targetDistanceMeters / ROAD_EXPANSION_FACTOR) - (distToWp * 2)) * scaleFactor;
+      
+      // 経度・緯度の差分
+      const dx = waypointCoords[1] - startLng;
+      const dy = waypointCoords[0] - startLat;
+      const len = Math.sqrt(dx * dx + dy * dy) || 1e-9;
+      
+      // 垂直方向の単位ベクトル
+      const nx = -dy / len;
+      const ny = dx / len;
+      
+      // 片道の膨らみ幅 (余剰距離の1/4程度をオフセットとする)
+      const offsetMeters = surplus / 4;
+      // 緯度の1度は約111320m
+      const offsetDegree = offsetMeters / 111320;
+      
+      // 経度補正（緯度によって経度1度の距離が変わるため）
+      const cosLat = Math.cos((startLat * Math.PI) / 180);
+      const offsetLngDegree = offsetDegree / (cosLat || 1);
+      
+      // 中間地点を行き(40%地点)と帰り(60%地点)に配置し、左右に膨らませる
+      const detour1Lat = startLat + dy * 0.4 + ny * offsetDegree;
+      const detour1Lng = startLng + dx * 0.4 + nx * offsetLngDegree;
+      
+      const detour2Lat = startLat + dy * 0.6 - ny * offsetDegree;
+      const detour2Lng = startLng + dx * 0.6 - nx * offsetLngDegree;
+      
+      allPoints = [
+        [startLat, startLng],
+        [detour1Lat, detour1Lng],
+        waypointCoords,
+        [detour2Lat, detour2Lng],
+        [startLat, startLng]
+      ];
     }
 
-    allPoints = [
-      [startLat, startLng],
-      ...waypoints,
-      [startLat, startLng],
-    ];
-  } else {
-    // 経由地がある場合：行きと帰りで経路を変えるため迂回ポイントを追加
-    const distToWp = haversine(startLat, startLng, waypointCoords[0], waypointCoords[1]);
-    
-    // 余剰距離 (目標距離から直線往復距離を引いたもの)
-    const surplus = Math.max(0, targetDistanceMeters - (distToWp * 2));
-    
-    // 経度・緯度の差分
-    const dx = waypointCoords[1] - startLng;
-    const dy = waypointCoords[0] - startLat;
-    const len = Math.sqrt(dx * dx + dy * dy) || 1e-9;
-    
-    // 垂直方向の単位ベクトル
-    const nx = -dy / len;
-    const ny = dx / len;
-    
-    // 片道の膨らみ幅 (余剰距離の1/4程度をオフセットとする)
-    const offsetMeters = surplus / 4;
-    // 緯度の1度は約111320m
-    const offsetDegree = offsetMeters / 111320;
-    
-    // 経度補正（緯度によって経度1度の距離が変わるため）
-    const cosLat = Math.cos((startLat * Math.PI) / 180);
-    const offsetLngDegree = offsetDegree / (cosLat || 1);
-    
-    // 中間地点を行き(40%地点)と帰り(60%地点)に配置し、左右に膨らませる
-    const detour1Lat = startLat + dy * 0.4 + ny * offsetDegree;
-    const detour1Lng = startLng + dx * 0.4 + nx * offsetLngDegree;
-    
-    const detour2Lat = startLat + dy * 0.6 - ny * offsetDegree;
-    const detour2Lng = startLng + dx * 0.6 - nx * offsetLngDegree;
-    
-    allPoints = [
-      [startLat, startLng],
-      [detour1Lat, detour1Lng],
-      waypointCoords,
-      [detour2Lat, detour2Lng],
-      [startLat, startLng]
-    ];
+    // OSRM uses lng,lat order
+    const coordsStr = allPoints.map(([lat, lng]) => `${lng},${lat}`).join(';');
+
+    // ★ foot プロファイルを使用して歩行者ルートを生成
+    const url = `${OSRM_API_BASE}/route/v1/foot/${coordsStr}?overview=full&geometries=geojson&steps=false`;
+
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`ルートの取得に失敗しました (HTTP ${response.status})`);
+    }
+
+    const data = await response.json();
+
+    if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) {
+      throw new Error('ルートが見つかりませんでした。別の設定を試してください。');
+    }
+
+    const route = data.routes[0];
+    const actualDistance: number = route.distance;
+
+    // 目標距離との比率を確認
+    const ratio = actualDistance / targetDistanceMeters;
+
+    if (ratio <= TOLERANCE_RATIO || attempt === MAX_RETRIES) {
+      // 許容範囲内 or 最後のリトライ → 結果を返す
+      const coordinates: [number, number][] = route.geometry.coordinates.map(
+        (coord: [number, number]) => [coord[1], coord[0]]
+      );
+
+      // foot プロファイルは歩行速度で所要時間を返すのでそのまま使用
+      return {
+        coordinates,
+        distanceMeters: actualDistance,
+        durationSeconds: route.duration,
+      };
+    }
+
+    // 距離が大きすぎる → 半径を縮小してリトライ
+    // 目標距離に合うようにスケールファクターを調整
+    scaleFactor *= (targetDistanceMeters / actualDistance);
+    console.log(`ルート距離が目標の ${ratio.toFixed(1)} 倍のため、スケールを ${scaleFactor.toFixed(2)} に調整して再試行 (${attempt + 1}/${MAX_RETRIES})`);
   }
 
-  // OSRM uses lng,lat order
-  const coordsStr = allPoints.map(([lat, lng]) => `${lng},${lat}`).join(';');
-
-  // ★ driving プロファイルを使用して主要道路（国道・県道）を優先
-  const url = `${OSRM_API_BASE}/route/v1/driving/${coordsStr}?overview=full&geometries=geojson&steps=false`;
-
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`ルートの取得に失敗しました (HTTP ${response.status})`);
-  }
-
-  const data = await response.json();
-
-  if (data.code !== 'Ok' || !data.routes || data.routes.length === 0) {
-    throw new Error('ルートが見つかりませんでした。別の設定を試してください。');
-  }
-
-  const route = data.routes[0];
-  // GeoJSON coordinates are [lng, lat], we need [lat, lng]
-  const coordinates: [number, number][] = route.geometry.coordinates.map(
-    (coord: [number, number]) => [coord[1], coord[0]]
-  );
-
-  // ★ 所要時間は車の速度で返ってくるため、歩行速度 (4km/h) で再計算する
-  const walkingDurationSeconds = (route.distance / (WALKING_SPEED_KMH * 1000)) * 3600;
-
-  return {
-    coordinates,
-    distanceMeters: route.distance,
-    durationSeconds: walkingDurationSeconds,
-  };
+  // ここには到達しないが、TypeScriptのために
+  throw new Error('ルートの生成に失敗しました。');
 }
 
 /**
